@@ -12,6 +12,6 @@ class Config:
     serial_port: str = "/dev/ttyACM0"
     baud: int = 115200
     post_every_seconds: int = 10
-    url: str = "https://httpbin.org/post" # URL = "http://127.0.0.1:8000/api/sensor/readings/"
+    url: str = "http://127.0.0.1:8000/api/sensor/readings/" # URL =  "https://httpbin.org/post"
     headers: Dict[str, str] = field(default_factory=lambda: DEFAULT_HEADERS.copy())
     patient_id: Optional[str] = "Patient/example"  # set to None to omit
