@@ -1,78 +1,170 @@
 import serial
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 
-# Serial port config
-ser = serial.Serial('/dev/ttyACM0', 9600, timeout=1)
-time.sleep(2)  # Give Arduino time to reset
-
-# API endpoint and headers
-URL = "https://httpbin.org/post"
+# ── Config ─────────────────────────────────────────────────────────────────────
+SERIAL_PORT = '/dev/ttyACM0'
+BAUD = 9600
+POST_EVERY_SECONDS = 10  # you used 10 for testing
+URL = "http://192.168.137.1:8000/api/sensor/readings/"
 HEADERS = {
-    "Content-Type": "application/json",
-    "X-API-KEY": "5538144ff69744518494080bff10fb86"
+    "Content-Type": "application/fhir+json",
+    "X-API-KEY": "ef0a30cf982749a38107d3f26c7ec8a7"
 }
 
-# Storage lists for 1-minute accumulation
-heart_rate_values = []
-oxygen_values = []
-temperature_values = []
-humidity_values = []
+# Optional (comment out if you don’t track a patient yet)
+PATIENT_ID = "Patient/example"  # e.g., "Patient/123". Or set to None to omit.
 
+# ── Serial ─────────────────────────────────────────────────────────────────────
+ser = serial.Serial(SERIAL_PORT, BAUD, timeout=1)
+time.sleep(2)
+
+# ── Buffers ────────────────────────────────────────────────────────────────────
+hr_vals, spo2_vals, temp_vals, hum_vals = [], [], [], []
 start_time = time.time()
-print("Starting...")
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+def obs_resource(code_system, code, display, value, unit, ucum_code,
+                 category_code="vital-signs", category_display="Vital Signs"):
+    # Skip if value is None
+    if value is None:
+        return None
+
+    res = {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [{
+            "coding": [{
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": category_code,
+                "display": category_display
+            }]
+        }],
+        "code": {
+            "coding": [{
+                "system": code_system,
+                "code": code,
+                "display": display
+            }],
+            "text": display
+        },
+        "effectiveDateTime": now_iso(),
+        "valueQuantity": {
+            "value": round(value, 2),
+            "unit": unit,
+            "system": "http://unitsofmeasure.org",
+            "code": ucum_code
+        }
+    }
+    if PATIENT_ID:
+        res["subject"] = {"reference": PATIENT_ID}
+    return res
+
+print("Starting…")
 while True:
     try:
-        line = ser.readline().decode('utf-8').strip()
-        if line:            
+        line = ser.readline().decode('utf-8', errors='ignore').strip()
+        if line:
             if "Heartrate:" in line:
-                heart_rate_values.append(int(line.split(":")[1].strip()))
+                try:
+                    v = int(line.split(":")[1])
+                    if v > 0:
+                        hr_vals.append(v)
+                except:
+                    pass
             elif "Oxygen:" in line:
-                oxygen_values.append(int(line.split(":")[1].strip()))
+                try:
+                    v = int(line.split(":")[1])
+                    if v > 0:
+                        spo2_vals.append(v)
+                except:
+                    pass
             elif "Temperature:" in line:
-                temp_str = line.split(":")[1].strip().replace("°C", "").strip()
-                temperature_values.append(float(temp_str))
+                try:
+                    v = float(line.split(":")[1].replace("°C", "").strip())
+                    temp_vals.append(v)
+                except:
+                    pass
             elif "Humidity:" in line:
-                hum_str = line.split(":")[1].strip().replace("%", "").strip()
-                humidity_values.append(float(hum_str))
+                try:
+                    v = float(line.split(":")[1].replace("%", "").strip())
+                    hum_vals.append(v)
+                except:
+                    pass
 
+        if time.time() - start_time >= POST_EVERY_SECONDS:
+            have_any = any([hr_vals, spo2_vals, temp_vals, hum_vals])
+            if have_any:
+                # Averages (with simple validity checks)
+                avg_hr = round(sum(hr_vals)/len(hr_vals), 2) if hr_vals else None
+                avg_spo2 = round(sum(spo2_vals)/len(spo2_vals), 2) if spo2_vals else None
+                avg_temp = round(sum(temp_vals)/len(temp_vals), 2) if temp_vals else None
+                avg_hum = round(sum(hum_vals)/len(hum_vals), 2) if hum_vals else None
 
-        # Check if 60 seconds passed
-        if time.time() - start_time >= 10:
-            if heart_rate_values or oxygen_values or temperature_values or humidity_values:
-                # Calculate averages
-                valid_heart_rates = [v for v in heart_rate_values if v > 0]
-                avg_heart_rate = sum(valid_heart_rates) / len(valid_heart_rates) if valid_heart_rates else 0                
-                valid_oxygen = [v for v in oxygen_values if v > 0]
-                avg_oxygen = sum(valid_oxygen) / len(valid_oxygen) if valid_oxygen else 0
-                avg_temperature = sum(temperature_values) / len(temperature_values)
-                avg_humidity = sum(humidity_values) / len(humidity_values)
+                # Build FHIR Observations
+                observations = []
 
-                # Prepare payload
-                payload = {
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "values": [
-                        {"sensory_name": "heart_rate", "sensory_value": round(avg_heart_rate, 2)},
-                        {"sensory_name": "oxygen", "sensory_value": round(avg_oxygen, 2)},
-                        {"sensory_name": "temperature", "sensory_value": round(avg_temperature, 2)},
-                        {"sensory_name": "humidity", "sensory_value": round(avg_humidity, 2)}
-                    ]
-                }
+                # Heart Rate — LOINC 8867-4, unit /min
+                if avg_hr is not None:
+                    observations.append(
+                        obs_resource(
+                            "http://loinc.org", "8867-4", "Heart rate",
+                            avg_hr, "beats/minute", "/min"
+                        )
+                    )
 
-                # Send to server
-                response = requests.post(URL, headers=HEADERS, json=payload)
-                print(f"\nPosted: {payload}")
-                print(f"Response: {response.status_code} - {response.text}\n")
+                # SpO2 — LOINC 59408-5, unit %
+                if avg_spo2 is not None:
+                    observations.append(
+                        obs_resource(
+                            "http://loinc.org", "59408-5", "Oxygen saturation in Arterial blood by Pulse oximetry",
+                            avg_spo2, "percent", "%"
+                        )
+                    )
 
+                # Body Temperature — LOINC 8310-5, unit Cel
+                if avg_temp is not None:
+                    observations.append(
+                        obs_resource(
+                            "http://loinc.org", "8310-5", "Body temperature",
+                            avg_temp, "°C", "Cel"
+                        )
+                    )
+
+                # Humidity — not a vital sign; send as generic Observation with local code
+                # If you later pick a standard LOINC for relative humidity, swap it in.
+                if avg_hum is not None:
+                    observations.append(
+                        obs_resource(
+                            "http://example.org/CodeSystem/sensor", "humidity", "Relative humidity",
+                            avg_hum, "percent", "%", category_code="environment", category_display="Environment"
+                        )
+                    )
+
+                # Remove Nones
+                observations = [o for o in observations if o]
+
+                if observations:
+                    bundle = {
+                        "resourceType": "Bundle",
+                        "type": "collection",
+                        "timestamp": now_iso(),
+                        "entry": [{"resource": r} for r in observations]
+                    }
+
+                    resp = requests.post(URL, headers=HEADERS, json=bundle, timeout=10)
+                    print(f"\nPosted FHIR Bundle with {len(observations)} Observations")
+                    print(f"Status: {resp.status_code} | Body: {resp.text}\n")
+                else:
+                    print("No valid averages to send this interval.")
             else:
-                print("No complete data collected in the last minute.")
+                print("No data collected in this interval.")
 
-            # Reset everything
-            heart_rate_values.clear()
-            oxygen_values.clear()
-            temperature_values.clear()
-            humidity_values.clear()
+            # Reset window
+            hr_vals.clear(); spo2_vals.clear(); temp_vals.clear(); hum_vals.clear()
             start_time = time.time()
 
     except KeyboardInterrupt:
