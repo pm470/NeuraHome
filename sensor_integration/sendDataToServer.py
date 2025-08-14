@@ -5,9 +5,9 @@ from datetime import datetime, timezone
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 SERIAL_PORT = '/dev/ttyACM0'
-BAUD = 9600
+BAUD = 115200
 POST_EVERY_SECONDS = 10  # you used 10 for testing
-URL = "http://192.168.137.1:8000/api/sensor/readings/"
+URL = "https://httpbin.org/post"
 HEADERS = {
     "Content-Type": "application/fhir+json",
     "X-API-KEY": "ef0a30cf982749a38107d3f26c7ec8a7"
@@ -29,7 +29,6 @@ def now_iso():
 
 def obs_resource(code_system, code, display, value, unit, ucum_code,
                  category_code="vital-signs", category_display="Vital Signs"):
-    # Skip if value is None
     if value is None:
         return None
 
@@ -85,7 +84,7 @@ while True:
             elif "Temperature:" in line:
                 try:
                     v = float(line.split(":")[1].replace("°C", "").strip())
-                    temp_vals.append(v)
+                    temp_vals.append(v)  # ambient temperature
                 except:
                     pass
             elif "Humidity:" in line:
@@ -107,7 +106,7 @@ while True:
                 # Build FHIR Observations
                 observations = []
 
-                # Heart Rate — LOINC 8867-4, unit /min
+                # Heart Rate — LOINC 8867-4, vital sign
                 if avg_hr is not None:
                     observations.append(
                         obs_resource(
@@ -116,7 +115,7 @@ while True:
                         )
                     )
 
-                # SpO2 — LOINC 59408-5, unit %
+                # SpO2 — LOINC 59408-5, vital sign
                 if avg_spo2 is not None:
                     observations.append(
                         obs_resource(
@@ -125,17 +124,20 @@ while True:
                         )
                     )
 
-                # Body Temperature — LOINC 8310-5, unit Cel
+                # Ambient Temperature — NOT a vital sign; send as environment
                 if avg_temp is not None:
                     observations.append(
                         obs_resource(
-                            "http://loinc.org", "8310-5", "Body temperature",
-                            avg_temp, "°C", "Cel"
+                            "http://example.org/CodeSystem/sensor",  # use a local code system for now
+                            "ambient-temperature",
+                            "Ambient temperature",
+                            avg_temp, "°C", "Cel",
+                            category_code="environment",
+                            category_display="Environment"
                         )
                     )
 
-                # Humidity — not a vital sign; send as generic Observation with local code
-                # If you later pick a standard LOINC for relative humidity, swap it in.
+                # Humidity — environment
                 if avg_hum is not None:
                     observations.append(
                         obs_resource(
